@@ -1,0 +1,89 @@
+# Pushing a v* tag builds the .deb and .rpm, test-installs each, and attaches both to the GitHub release.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  deb:
+    name: Debian package
+    runs-on: ubuntu-latest
+    # Debian 12's older glibc keeps the package installable on Debian 12+ and Ubuntu 22.04+.
+    container: debian:12
+    steps:
+      - name: Install build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git gcc libc6-dev binutils python3
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build
+        run: ./scripts/build-deb.sh
+      - name: Inspect and test-install
+        run: |
+          dpkg-deb --info dist/*.deb
+          dpkg-deb --contents dist/*.deb
+          apt-get install -y ./dist/*.deb
+          envoke --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb
+          path: dist/*
+          if-no-files-found: error
+
+  rpm:
+    name: Fedora package
+    runs-on: ubuntu-latest
+    container: fedora:44
+    steps:
+      - name: Install build tools
+        run: dnf install -y gcc python3 rpm binutils coreutils git tar
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build
+        run: ./scripts/build-rpm.sh
+      - name: Inspect and test-install
+        run: |
+          rpm -qpi dist/*.rpm
+          rpm -qpR dist/*.rpm
+          dnf install -y ./dist/*.rpm
+          envoke --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: [deb, rpm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create the release with both packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l dist
+          # A re-pushed tag replaces the files of its existing release instead of failing.
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "envoke ${GITHUB_REF_NAME#v}" \
+              --generate-notes
+          fi
